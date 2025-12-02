@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>MoCap Web – JSON para el gato</title>
+
+  <!-- TensorFlow.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+  <!-- Pose Detection API -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+  <!-- MoveNet -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection/dist/movenet.js"></script>
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+    background: #000;          
+    color: #f0f0f0;            
+    font-family: Arial;
+    display: flex;
+    flex-direction: column;
+    align-items: center;       
+    justify-content: flex-start;
+    min-height: 100vh;        
+  }
+
+  h2 {
+    margin-top: 20px;
+    color: #ffffff;
+  }
+
+  #video {
+    border: 2px solid #666;
+    border-radius: 10px;
+    margin-top: 20px;
+  }
+
+  button {
+    background: #222;
+    color: #fff;
+    border: 1px solid #555;
+    padding: 10px 18px;
+    margin: 10px;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 15px;
+  }
+
+  button:hover {
+    background: #444;
+  }
+
+  #estado {
+    margin-top: 15px;
+    font-size: 16px;
+    color: #ccc;
+  }
+</style>
+
+</head>
+  <h2>MoCap Web – Grabador de animación</h2>
+
+  <video id="video" autoplay playsinline width="600" style="border:1px solid #ccc;"></video>
+  <br><br>
+  <button id="btnStart">Empezar captura</button>
+  <button id="btnStop">Detener y guardar JSON</button>
+
+  <pre id="estado"></pre>
+
+<script>
+const framerate = 30;            // fps lógicos de la captura
+const frames   = [];
+const bones    = ["LeftUpperArm","LeftLowerArm","RightUpperArm","RightLowerArm"];
+
+let detector = null;
+let running  = false;
+
+// ---------- utilidades vector ----------
+function subVec(a,b){
+  return [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+}
+function dot(a,b){
+  return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+function cross(a,b){
+  return [
+    a[1]*b[2] - a[2]*b[1],
+    a[2]*b[0] - a[0]*b[2],
+    a[0]*b[1] - a[1]*b[0]
+  ];
+}
+function norm(v){
+  return Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) || 1e-8;
+}
+function normalize(v){
+  const n = norm(v);
+  return [v[0]/n, v[1]/n, v[2]/n];
+}
+
+// ---------- cuaternión robusto v1 -> v2 ----------
+function quatFromVectors(v1, v2){
+  v1 = normalize(v1);
+  v2 = normalize(v2);
+
+  const d = dot(v1, v2);
+
+  // Caso casi 180°
+  if (d < -0.999999) {
+    let axis = Math.abs(v1[0]) < 0.1 ? [1,0,0] : [0,1,0];
+    axis = normalize(cross(v1, axis));
+    // rotación de 180°
+    return [0, axis[0], axis[1], axis[2]]; // w=0, xyz=eje
+  }
+
+  const c   = cross(v1, v2);
+  const s   = Math.sqrt((1 + d) * 2);
+  const inv = 1 / s;
+
+  let q = [
+    s * 0.5,
+    c[0] * inv,
+    c[1] * inv,
+    c[2] * inv
+  ];
+
+  // normalizar por seguridad
+  const qn = Math.sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]) || 1e-8;
+  return [q[0]/qn, q[1]/qn, q[2]/qn, q[3]/qn]; // [w,x,y,z]
+}
+
+// ---------- bases (primer frame) ----------
+let baseLeftUpper  = null;
+let baseLeftLower  = null;
+let baseRightUpper = null;
+let baseRightLower = null;
+
+// ---------- inicializar cámara y modelo ----------
+async function init(){
+  const estado = document.getElementById("estado");
+  const video  = document.getElementById("video");
+
+  try{
+    video.srcObject = await navigator.mediaDevices.getUserMedia({video:true});
+  }catch(e){
+    estado.textContent = "Error: permite acceso a la cámara en el navegador.";
+    return;
+  }
+
+  estado.textContent = "Cargando MoveNet...";
+  detector = await poseDetection.createDetector(
+    poseDetection.SupportedModels.MoveNet,
+    { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+  );
+  estado.textContent = "Modelo cargado. Pulsa 'Empezar captura'.";
+}
+
+async function loop(){
+  if(!running || !detector) return;
+
+  const video  = document.getElementById("video");
+  const estado = document.getElementById("estado");
+
+  const poses = await detector.estimatePoses(video);
+
+  if(poses.length > 0){
+    const kp = poses[0].keypoints;
+
+    function get3D(id){
+      const p = kp[id];
+      return [p.x, p.y, 0]; // plano z=0
+    }
+
+    const lShoulder = get3D(5);
+    const lElbow    = get3D(7);
+    const lWrist    = get3D(9);
+    const rShoulder = get3D(6);
+    const rElbow    = get3D(8);
+    const rWrist    = get3D(10);
+
+    const vLeftUpper  = subVec(lElbow,  lShoulder);
+    const vLeftLower  = subVec(lWrist,  lElbow);
+    const vRightUpper = subVec(rElbow,  rShoulder);
+    const vRightLower = subVec(rWrist,  rElbow);
+
+    // Primer frame = base
+    if (!baseLeftUpper){
+      baseLeftUpper  = vLeftUpper.slice();
+      baseLeftLower  = vLeftLower.slice();
+      baseRightUpper = vRightUpper.slice();
+      baseRightLower = vRightLower.slice();
+    }
+
+    const qLeftUpper  = quatFromVectors(baseLeftUpper,  vLeftUpper);
+    const qLeftLower  = quatFromVectors(baseLeftLower,  vLeftLower);
+    const qRightUpper = quatFromVectors(baseRightUpper, vRightUpper);
+    const qRightLower = quatFromVectors(baseRightLower, vRightLower);
+
+    // IMPORTANTE: aquí guardamos directamente [w,x,y,z],
+    // ya NO [1,0,0,ángulo]
+    frames.push({
+      LeftUpperArm:  qLeftUpper,
+      LeftLowerArm:  qLeftLower,
+      RightUpperArm: qRightUpper,
+      RightLowerArm: qRightLower
+    });
+
+    estado.textContent = `Frames capturados: ${frames.length}`;
+  }
+
+  setTimeout(() => requestAnimationFrame(loop), 1000/framerate);
+}
+
+document.getElementById("btnStart").onclick = () => {
+  frames.length = 0;
+  baseLeftUpper = baseLeftLower = baseRightUpper = baseRightLower = null;
+  running = true;
+  loop();
+};
+
+document.getElementById("btnStop").onclick = () => {
+  running = false;
+
+  const data = {
+    framerate: framerate,
+    bones: bones,
+    frames: frames
+  };
+
+  const jsonText = JSON.stringify(data, null, 2);
+  const blob = new Blob([jsonText], {type:"application/json"});
+  const url  = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "animacion.json";
+  a.click();
+};
+
+init();
+</script>
+
+</body>
+</html>
