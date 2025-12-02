@@ -89,6 +89,8 @@ function cross(a,b){
     a[0]*b[1] - a[1]*b[0]
   ];
 }
+
+// normalizamos vectores
 function norm(v){
   return Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) || 1e-8;
 }
@@ -97,7 +99,6 @@ function normalize(v){
   return [v[0]/n, v[1]/n, v[2]/n];
 }
 
-// ---------- cuaternión robusto v1 -> v2 ----------
 function quatFromVectors(v1, v2){
   v1 = normalize(v1);
   v2 = normalize(v2);
